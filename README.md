@@ -2,9 +2,10 @@
 
 EverCrawl server
 
+The game design document is accessible [here](./design.md). The server-specific architecture document is accessible [here](./architecture.md).
+
 # Requirements
 
-* [PostgreSQL](https://www.postgresql.org/)
 * [Rust](https://www.rust-lang.org/learn/get-started)
 
 # Usage
@@ -12,7 +13,3 @@ EverCrawl server
 ```sh
 > cargo run
 ```
-
-# Architecture
-
-See [architecture](./architecture.md)

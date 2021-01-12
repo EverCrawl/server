@@ -114,4 +114,4 @@ fn main() {
 }
 ```
 
-The potential for parallelization comes from being able to split the arrays into parts and process them individually.
+The potential for parallelization comes from being able to split the arrays into parts and process them on separate threads.
