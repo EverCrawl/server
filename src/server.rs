@@ -23,14 +23,14 @@ impl Server {
     }
 
     pub fn start(&mut self) -> Result<()> {
-        info!("Server starting...");
+        info!(target: "Server", "Starting...");
         let acceptor = self.acceptor.clone();
         net::spawn_network(async move {
             if let Err(e) = acceptor.start().await {
                 panic!(e);
             }
         })?;
-        info!("Server startup successful");
+        info!(target: "Server", "Startup successful");
 
         let mut then = Instant::now();
         loop {
@@ -50,7 +50,7 @@ impl Server {
     }
 
     fn tick(&mut self) {
-        info!("Tick");
+        info!(target: "Server", "Tick");
         // handle new sessions
         while let Some(session) = self.session_queue.try_pop() {
             self.sessions.push(session);

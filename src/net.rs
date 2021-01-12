@@ -103,17 +103,20 @@ impl Acceptor {
         id: Arc<AtomicU32>,
     ) {
         info!(target: "Acceptor", "New peer {}", peer);
-        if let Err(e) = Socket::start(peer, stream, connections.clone(), id).await {
-            handle_socket_error(e);
+        if let Err(err) = Socket::start(
+            peer,
+            stream,
+            connections.clone(),
+            id.fetch_add(1, Ordering::SeqCst),
+        )
+        .await
+        {
+            use tungstenite::Error;
+            match err {
+                Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+                err => error!("Error processing connection: {}", err),
+            }
         }
-    }
-}
-
-fn handle_socket_error(err: tungstenite::Error) {
-    use tungstenite::Error;
-    match err {
-        Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-        err => error!("Error processing connection: {}", err),
     }
 }
 
@@ -123,19 +126,14 @@ impl Socket {
         peer: SocketAddr,
         stream: TcpStream,
         connections: Arc<SessionQueue>,
-        id: Arc<AtomicU32>,
+        id: u32,
     ) -> tungstenite::Result<()> {
         let mut ws = accept_async(stream).await.expect("Failed to accept");
         info!(target: "WebSocket", "Connection established with peer {}", peer);
 
         // TODO: what's a good size for the message queue?
         let queue = Arc::new(MessageQueue::new(4));
-        connections
-            .push(Session::new(
-                id.fetch_add(1, Ordering::SeqCst),
-                queue.clone(),
-            ))
-            .await;
+        connections.push(Session::new(id, queue.clone())).await;
 
         loop {
             if util::Control::should_stop() {
