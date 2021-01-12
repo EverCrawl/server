@@ -51,12 +51,20 @@ impl Server {
 
     fn tick(&mut self) {
         info!("Tick");
+        // handle new sessions
         while let Some(session) = self.session_queue.try_pop() {
             self.sessions.push(session);
         }
 
+        for session in self.sessions.iter_mut() {
+            while let Some(msg) = session.recv() {
+                // echo all messages back
+                session.send(msg);
+            }
+        }
+
         for session in self.sessions.iter() {
-            session.send("Tick".into()).expect("Failed to send message");
+            session.send("Tick".into());
         }
     }
 }

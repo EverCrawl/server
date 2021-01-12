@@ -8,33 +8,41 @@ use std::sync::{
 };
 use std::thread;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
 use tokio_tungstenite::accept_async;
 use tungstenite as ws;
 
 pub type SessionQueue = deadqueue::limited::Queue<Session>;
-
 pub type Message = String;
+pub type MessageQueue = deadqueue::limited::Queue<Message>;
 
 pub struct Session {
     id: u32,
-    sender: mpsc::Sender<Message>,
+    queue: Arc<MessageQueue>,
 }
 
 #[allow(dead_code)]
 impl Session {
-    pub fn new(id: u32, sender: mpsc::Sender<Message>) -> Session {
-        Session { id, sender }
+    pub fn new(id: u32, queue: Arc<MessageQueue>) -> Session {
+        Session { id, queue }
     }
 
     pub fn id(&self) -> u32 {
         self.id
     }
 
-    pub fn send(&self, msg: Message) -> Result<()> {
-        self.sender.blocking_send(msg)?;
+    pub fn send(&self, mut msg: Message) {
+        // If the queue is full, keep trying to send the message.
+        loop {
+            // try_push returns the msg as Err(msg) if the queue is full
+            msg = match self.queue.try_push(msg) {
+                Err(e) => e,
+                Ok(()) => return,
+            }
+        }
+    }
 
-        Ok(())
+    pub fn recv(&mut self) -> Option<Message> {
+        self.queue.try_pop()
     }
 }
 
@@ -67,7 +75,7 @@ impl Acceptor {
     }
 
     pub async fn start(&self) -> Result<(), tokio::io::Error> {
-        info!("Acceptor listening on {}", self.addr);
+        info!(target: "Acceptor", "Listening on {}", self.addr);
         let listener = TcpListener::bind(&self.addr).await?;
 
         while let Ok((stream, _)) = listener.accept().await {
@@ -76,7 +84,6 @@ impl Acceptor {
             let peer = stream
                 .peer_addr()
                 .expect("connected streams should have a peer address");
-            info!("Peer address: {}", peer);
 
             tokio::spawn(Acceptor::accept(
                 peer,
@@ -95,44 +102,56 @@ impl Acceptor {
         connections: Arc<SessionQueue>,
         id: Arc<AtomicU32>,
     ) {
-        info!("New incoming connection on peer address {}", peer);
-        if let Err(e) = Acceptor::handle(peer, stream, connections.clone(), id).await {
-            use tungstenite::Error;
-            match e {
-                Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-                err => error!("Error processing connection: {}", err),
-            }
+        info!(target: "Acceptor", "New peer {}", peer);
+        if let Err(e) = Socket::start(peer, stream, connections.clone(), id).await {
+            handle_socket_error(e);
         }
     }
+}
 
-    async fn handle(
+fn handle_socket_error(err: tungstenite::Error) {
+    use tungstenite::Error;
+    match err {
+        Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+        err => error!("Error processing connection: {}", err),
+    }
+}
+
+struct Socket;
+impl Socket {
+    async fn start(
         peer: SocketAddr,
         stream: TcpStream,
         connections: Arc<SessionQueue>,
         id: Arc<AtomicU32>,
     ) -> tungstenite::Result<()> {
-        let ws_stream = accept_async(stream).await.expect("Failed to accept");
-        info!("Connection established with peer address {}", peer);
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
-        let (tx, mut rx) = mpsc::channel::<String>(1);
-        let id = id.fetch_add(1, Ordering::SeqCst);
-        let _ = connections.push(Session::new(id, tx)).await;
+        let mut ws = accept_async(stream).await.expect("Failed to accept");
+        info!(target: "WebSocket", "Connection established with peer {}", peer);
+
+        // TODO: what's a good size for the message queue?
+        let queue = Arc::new(MessageQueue::new(4));
+        connections
+            .push(Session::new(
+                id.fetch_add(1, Ordering::SeqCst),
+                queue.clone(),
+            ))
+            .await;
 
         loop {
             if util::Control::should_stop() {
                 break;
             }
             tokio::select! {
-                Some(msg) = ws_receiver.next() => {
+                Some(msg) = ws.next() => {
                     let msg = msg?;
                     if msg.is_text() || msg.is_binary() {
-                        ws_sender.send(msg).await?;
+                        ws.send(msg).await?;
                     } else if msg.is_close() {
                         break;
                     }
                 },
-                Some(msg) = rx.recv() => {
-                    ws_sender.send(ws::Message::Text(msg)).await?;
+                msg = queue.pop() => {
+                    ws.send(ws::Message::Text(msg)).await?;
                 }
             }
         }
