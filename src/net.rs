@@ -1,33 +1,51 @@
-use crate::util;
+use crate::util::Control;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
+use std::convert::From;
 use std::net::SocketAddr;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
 };
 use std::thread;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::{accept_async, WebSocketStream};
 use tungstenite as ws;
 
-pub type SessionQueue = deadqueue::limited::Queue<Session>;
+pub type SessionQueue = deadqueue::limited::Queue<ClientEvent>;
 pub type Message = String;
 pub type MessageQueue = deadqueue::limited::Queue<Message>;
 
+// TODO: anytime the client does anything unexpected, immediately disconnect them
+
+pub enum ClientEvent {
+    Connected(Session),
+    Disconnected(u32),
+}
+
 pub struct Session {
     id: u32,
+    credentials: Credentials,
     queue: Arc<MessageQueue>,
 }
 
 #[allow(dead_code)]
 impl Session {
-    pub fn new(id: u32, queue: Arc<MessageQueue>) -> Session {
-        Session { id, queue }
+    pub fn new(id: u32, credentials: Credentials, queue: Arc<MessageQueue>) -> Session {
+        Session {
+            id,
+            credentials,
+            queue,
+        }
     }
 
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    pub fn cred(&self) -> &Credentials {
+        &self.credentials
     }
 
     pub fn send(&self, mut msg: Message) {
@@ -75,7 +93,7 @@ impl Acceptor {
     }
 
     pub async fn start(&self) -> Result<(), tokio::io::Error> {
-        info!(target: "Acceptor", "Listening on {}", self.addr);
+        log::info!(target: "Acceptor", "Listening on {}", self.addr);
         let listener = TcpListener::bind(&self.addr).await?;
 
         while let Ok((stream, _)) = listener.accept().await {
@@ -102,7 +120,7 @@ impl Acceptor {
         connections: Arc<SessionQueue>,
         id: Arc<AtomicU32>,
     ) {
-        info!(target: "Acceptor", "New peer {}", peer);
+        log::info!(target: "Acceptor", "New peer {}", peer);
         if let Err(err) = Socket::start(
             peer,
             stream,
@@ -112,12 +130,66 @@ impl Acceptor {
         .await
         {
             use tungstenite::Error;
-            match err {
-                Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-                err => error!("Error processing connection: {}", err),
+            match err.downcast::<Error>() {
+                Ok(err) => match err {
+                    Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
+                    err => log::error!("Error processing connection: {}", err),
+                },
+                Err(err) => log::error!("Error processing connection: {}", err),
             }
         }
     }
+}
+
+struct InvalidCredentials {
+    pub token: String,
+}
+
+impl InvalidCredentials {
+    async fn validate(self) -> Result<Credentials> {
+        // TODO: query database here
+        log::info!(target: "Authentication", "Token: {}", self.token);
+        Ok(Credentials { token: self.token })
+    }
+}
+impl From<String> for InvalidCredentials {
+    fn from(token: String) -> Self {
+        InvalidCredentials { token }
+    }
+}
+
+pub struct Credentials {
+    pub token: String,
+}
+
+async fn wait_for_credentials(ws: &mut WebSocketStream<TcpStream>) -> Result<Credentials> {
+    tokio::select! {
+        // Either:
+        // Server stops
+        _ = Control::should_stop_async() => {
+            Err(anyhow::anyhow!("Failed to authenticate"))
+        }
+        // Authentication times out
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+            Err(anyhow::anyhow!("Failed to authenticate"))
+        }
+        // We receive the authentication message
+        Some(msg) = ws.next() => {
+            let msg = msg?;
+            if msg.is_text() {
+                // If so, it gets validated by querying the DB
+                Ok(InvalidCredentials::from(msg.into_text()?).validate().await?)
+            } else {
+                Err(anyhow::anyhow!("Failed to authenticate"))
+            }
+        }
+    }
+}
+
+async fn authenticate(stream: TcpStream) -> Result<(WebSocketStream<TcpStream>, Credentials)> {
+    let mut ws = accept_async(stream).await?;
+    let credentials = wait_for_credentials(&mut ws).await?;
+    Ok((ws, credentials))
 }
 
 struct Socket;
@@ -127,25 +199,35 @@ impl Socket {
         stream: TcpStream,
         connections: Arc<SessionQueue>,
         id: u32,
-    ) -> tungstenite::Result<()> {
-        let mut ws = accept_async(stream).await.expect("Failed to accept");
-        info!(target: "WebSocket", "Connection established with peer {}", peer);
+    ) -> Result<()> {
+        let (mut ws, cred) = authenticate(stream).await?;
+        log::info!(target: "WebSocket", "Connection established with peer {}", peer);
 
         // TODO: what's a good size for the message queue?
         let queue = Arc::new(MessageQueue::new(4));
-        connections.push(Session::new(id, queue.clone())).await;
+        connections
+            .push(ClientEvent::Connected(Session::new(
+                id,
+                cred,
+                queue.clone(),
+            )))
+            .await;
 
         loop {
-            if util::Control::should_stop() {
-                break;
-            }
             tokio::select! {
+                _ = Control::should_stop_async() => {
+                    // Don't need to notify server about disconnection
+                    // Everyone is getting disconnected, process shutdown
+                    // is our garbage collector :)
+                    break;
+                }
                 Some(msg) = ws.next() => {
                     let msg = msg?;
-                    if msg.is_text() || msg.is_binary() {
-                        ws.send(msg).await?;
+                    // TODO: binary only instead of text
+                    if msg.is_text() {
+                        queue.push(msg.into_text().unwrap()).await;
                     } else if msg.is_close() {
-                        break;
+                        connections.push(ClientEvent::Disconnected(id)).await;
                     }
                 },
                 msg = queue.pop() => {

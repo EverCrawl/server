@@ -1,6 +1,7 @@
 use crate::net;
 use crate::util;
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ pub struct Server {
     acceptor: Arc<net::Acceptor>,
     // TODO: move into separate struct Game
     session_queue: Arc<net::SessionQueue>,
-    sessions: Vec<net::Session>,
+    sessions: HashMap<u32, net::Session>,
 }
 
 impl Server {
@@ -18,19 +19,19 @@ impl Server {
         Server {
             acceptor: Arc::new(net::Acceptor::new(addr, session_queue.clone())),
             session_queue,
-            sessions: Vec::new(),
+            sessions: HashMap::new(),
         }
     }
 
     pub fn start(&mut self) -> Result<()> {
-        info!(target: "Server", "Starting...");
+        log::info!(target: "Server", "Starting...");
         let acceptor = self.acceptor.clone();
         net::spawn_network(async move {
             if let Err(e) = acceptor.start().await {
                 panic!(e);
             }
         })?;
-        info!(target: "Server", "Startup successful");
+        log::info!(target: "Server", "Startup successful");
 
         let mut then = Instant::now();
         loop {
@@ -39,7 +40,7 @@ impl Server {
             }
 
             let now = Instant::now();
-            if now - then >= Duration::from_secs(1) {
+            if now - then >= Duration::from_secs_f64(1.0 / 30.0) {
                 then = now;
 
                 self.tick();
@@ -50,20 +51,30 @@ impl Server {
     }
 
     fn tick(&mut self) {
-        info!(target: "Server", "Tick");
+        // info!(target: "Server", "Tick");
         // handle new sessions
-        while let Some(session) = self.session_queue.try_pop() {
-            self.sessions.push(session);
+        while let Some(event) = self.session_queue.try_pop() {
+            use net::ClientEvent;
+            match event {
+                ClientEvent::Connected(session) => {
+                    log::info!(target: "Server", "Server got client {}", session.id());
+                    self.sessions.insert(session.id(), session)
+                }
+                ClientEvent::Disconnected(id) => {
+                    log::info!(target: "Server", "Server lost client {}", id);
+                    self.sessions.remove(&id)
+                }
+            };
         }
 
-        for session in self.sessions.iter_mut() {
+        for (_, session) in self.sessions.iter_mut() {
             while let Some(msg) = session.recv() {
                 // echo all messages back
                 session.send(msg);
             }
         }
 
-        for session in self.sessions.iter() {
+        for (_, session) in self.sessions.iter() {
             session.send("Tick".into());
         }
     }
