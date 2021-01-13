@@ -80,15 +80,15 @@ pub fn spawn_network<F: std::future::Future + Sync + Send + 'static>(
 pub struct Acceptor {
     addr: String,
     id: Arc<AtomicU32>,
-    connections: Arc<SessionQueue>,
+    squeue: Arc<SessionQueue>,
 }
 
 impl Acceptor {
-    pub fn new(addr: &str, connections: Arc<SessionQueue>) -> Acceptor {
+    pub fn new(addr: &str, squeue: Arc<SessionQueue>) -> Acceptor {
         Acceptor {
             addr: addr.to_string(),
             id: Arc::new(AtomicU32::new(0)),
-            connections,
+            squeue,
         }
     }
 
@@ -106,7 +106,7 @@ impl Acceptor {
             tokio::spawn(Acceptor::accept(
                 peer,
                 stream,
-                self.connections.clone(),
+                self.squeue.clone(),
                 self.id.clone(),
             ));
         }
@@ -117,14 +117,14 @@ impl Acceptor {
     async fn accept(
         peer: SocketAddr,
         stream: TcpStream,
-        connections: Arc<SessionQueue>,
+        squeue: Arc<SessionQueue>,
         id: Arc<AtomicU32>,
     ) {
         log::info!(target: "Acceptor", "New peer {}", peer);
         if let Err(err) = Socket::start(
             peer,
             stream,
-            connections.clone(),
+            squeue.clone(),
             id.fetch_add(1, Ordering::SeqCst),
         )
         .await
@@ -197,40 +197,38 @@ impl Socket {
     async fn start(
         peer: SocketAddr,
         stream: TcpStream,
-        connections: Arc<SessionQueue>,
+        squeue: Arc<SessionQueue>,
         id: u32,
     ) -> Result<()> {
         let (mut ws, cred) = authenticate(stream).await?;
         log::info!(target: "WebSocket", "Connection established with peer {}", peer);
 
         // TODO: what's a good size for the message queue?
-        let queue = Arc::new(MessageQueue::new(4));
-        connections
+        let mqueue = Arc::new(MessageQueue::new(4));
+        squeue
             .push(ClientEvent::Connected(Session::new(
                 id,
                 cred,
-                queue.clone(),
+                mqueue.clone(),
             )))
             .await;
 
         loop {
             tokio::select! {
                 _ = Control::should_stop_async() => {
-                    // Don't need to notify server about disconnection
-                    // Everyone is getting disconnected, process shutdown
-                    // is our garbage collector :)
+                    // Don't need to notify server about disconnection, process shutdown is our garbage collector.
                     break;
                 }
                 Some(msg) = ws.next() => {
                     let msg = msg?;
                     // TODO: binary only instead of text
                     if msg.is_text() {
-                        queue.push(msg.into_text().unwrap()).await;
+                        mqueue.push(msg.into_text().unwrap()).await;
                     } else if msg.is_close() {
-                        connections.push(ClientEvent::Disconnected(id)).await;
+                        squeue.push(ClientEvent::Disconnected(id)).await;
                     }
                 },
-                msg = queue.pop() => {
+                msg = mqueue.pop() => {
                     ws.send(ws::Message::Text(msg)).await?;
                 }
             }
