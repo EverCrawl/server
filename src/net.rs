@@ -7,7 +7,6 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
 };
-use std::thread;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, WebSocketStream};
@@ -40,14 +39,17 @@ impl Session {
         }
     }
 
+    #[inline]
     pub fn id(&self) -> u32 {
         self.id
     }
 
+    #[inline]
     pub fn cred(&self) -> &Credentials {
         &self.credentials
     }
 
+    #[inline]
     pub fn send(&self, mut msg: Message) {
         // If the queue is full, keep trying to send the message.
         loop {
@@ -59,22 +61,10 @@ impl Session {
         }
     }
 
+    #[inline]
     pub fn recv(&mut self) -> Option<Message> {
         self.queue.try_pop()
     }
-}
-
-pub fn spawn_network<F: std::future::Future + Sync + Send + 'static>(
-    future: F,
-) -> Result<thread::JoinHandle<()>> {
-    // Runtime is built before spawning the thread, so the error can immediately propagate
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    Ok(thread::spawn(move || {
-        runtime.block_on(future);
-    }))
 }
 
 pub struct Acceptor {
@@ -84,17 +74,17 @@ pub struct Acceptor {
 }
 
 impl Acceptor {
-    pub fn new(addr: &str, squeue: Arc<SessionQueue>) -> Acceptor {
+    pub fn new(addr: String, squeue: Arc<SessionQueue>) -> Acceptor {
         Acceptor {
-            addr: addr.to_string(),
+            addr,
             id: Arc::new(AtomicU32::new(0)),
             squeue,
         }
     }
 
-    pub async fn start(&self) -> Result<(), tokio::io::Error> {
-        log::info!(target: "Acceptor", "Listening on {}", self.addr);
+    pub async fn start(self: Arc<Self>) -> Result<(), tokio::io::Error> {
         let listener = TcpListener::bind(&self.addr).await?;
+        log::info!(target: "Acceptor", "Bound to {}", self.addr);
 
         while let Ok((stream, _)) = listener.accept().await {
             // disable nagle's algorithm
@@ -120,22 +110,24 @@ impl Acceptor {
         squeue: Arc<SessionQueue>,
         id: Arc<AtomicU32>,
     ) {
-        log::info!(target: "Acceptor", "New peer {}", peer);
-        if let Err(err) = Socket::start(
-            peer,
-            stream,
-            squeue.clone(),
-            id.fetch_add(1, Ordering::SeqCst),
-        )
-        .await
+        log::debug!(target: "Acceptor", "New peer {}, authenticating", peer);
+        let (ws, cred) = match authenticate(stream).await {
+            Ok(value) => value,
+            Err(err) => return log::error!(target: "Socket", "{}", err),
+        };
+        log::debug!(target: "Acceptor", "Peer {} authenticated", peer);
+
+        if let Err(err) = Arc::new(Socket::new(id.fetch_add(1, Ordering::SeqCst), peer, cred))
+            .start(ws, squeue)
+            .await
         {
             use tungstenite::Error;
-            match err.downcast::<Error>() {
+            match err.downcast::<tungstenite::Error>() {
                 Ok(err) => match err {
                     Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-                    err => log::error!("Error processing connection: {}", err),
+                    err => log::error!(target: "Socket", "{}", err),
                 },
-                Err(err) => log::error!("Error processing connection: {}", err),
+                Err(err) => log::error!(target: "Socket", "{}", err),
             }
         }
     }
@@ -148,7 +140,7 @@ struct InvalidCredentials {
 impl InvalidCredentials {
     async fn validate(self) -> Result<Credentials> {
         // TODO: query database here
-        log::info!(target: "Authentication", "Token: {}", self.token);
+        log::trace!(target: "Authentication", "Token: {}", self.token);
         Ok(Credentials { token: self.token })
     }
 }
@@ -158,6 +150,7 @@ impl From<String> for InvalidCredentials {
     }
 }
 
+#[derive(Clone)]
 pub struct Credentials {
     pub token: String,
 }
@@ -192,23 +185,34 @@ async fn authenticate(stream: TcpStream) -> Result<(WebSocketStream<TcpStream>, 
     Ok((ws, credentials))
 }
 
-struct Socket;
+struct Socket {
+    id: u32,
+    peer: SocketAddr,
+    credentials: Credentials,
+}
 impl Socket {
+    fn new(id: u32, peer: SocketAddr, credentials: Credentials) -> Socket {
+        Socket {
+            id,
+            peer,
+            credentials,
+        }
+    }
+
     async fn start(
-        peer: SocketAddr,
-        stream: TcpStream,
+        self: Arc<Self>,
+        mut stream: WebSocketStream<TcpStream>,
         squeue: Arc<SessionQueue>,
-        id: u32,
     ) -> Result<()> {
-        let (mut ws, cred) = authenticate(stream).await?;
-        log::info!(target: "WebSocket", "Connection established with peer {}", peer);
+        log::debug!(target: "WebSocket", "{} connected", self.peer);
 
         // TODO: what's a good size for the message queue?
         let mqueue = Arc::new(MessageQueue::new(4));
+
         squeue
             .push(ClientEvent::Connected(Session::new(
-                id,
-                cred,
+                self.id,
+                self.credentials.clone(),
                 mqueue.clone(),
             )))
             .await;
@@ -219,17 +223,17 @@ impl Socket {
                     // Don't need to notify server about disconnection, process shutdown is our garbage collector.
                     break;
                 }
-                Some(msg) = ws.next() => {
+                Some(msg) = stream.next() => {
                     let msg = msg?;
                     // TODO: binary only instead of text
                     if msg.is_text() {
                         mqueue.push(msg.into_text().unwrap()).await;
                     } else if msg.is_close() {
-                        squeue.push(ClientEvent::Disconnected(id)).await;
+                        squeue.push(ClientEvent::Disconnected(self.id)).await;
                     }
                 },
                 msg = mqueue.pop() => {
-                    ws.send(ws::Message::Text(msg)).await?;
+                    stream.send(ws::Message::Text(msg)).await?;
                 }
             }
         }

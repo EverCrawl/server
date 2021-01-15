@@ -1,17 +1,44 @@
+// To allow for impls with `fn (self: Arc<Self>) { ... }`
+#![feature(arbitrary_self_types)]
+
+mod config;
 mod db;
 mod net;
 mod server;
+#[macro_use]
 mod util;
 
 use anyhow::Result;
 
+fn setup_panic() {
+    use std::panic;
+    use std::process;
+
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        orig_hook(panic_info);
+        process::exit(1);
+    }));
+}
+
 fn main() -> Result<()> {
-    dotenv::dotenv().unwrap();
+    setup_panic();
+
+    // default logging to "info"
+    match std::env::var("RUST_LOG") {
+        Ok(_) => (),
+        Err(_) => std::env::set_var("RUST_LOG", "info"),
+    };
+    // initialize logging
     pretty_env_logger::init();
+    // initialize SIGINT/SIGTERM handler
     util::Control::init()?;
 
-    let addr = std::env::var("SERVER_ADDRESS").unwrap_or_else(|_| "127.0.0.1:9002".into());
-    server::Server::new(&addr).start()?;
+    use config::Config;
+    use server::*;
+
+    let config = Config::load("config.toml")?;
+    Server::new(config).start()?;
 
     Ok(())
 }

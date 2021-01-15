@@ -1,42 +1,58 @@
+use crate::config::Config;
+use crate::db;
 use crate::net;
+use crate::unrecoverable;
 use crate::util;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
+use tokio_compat_02::FutureExt;
 
+/// Represents a game server instance, encapsulating all of its functionality.
 pub struct Server {
     acceptor: Arc<net::Acceptor>,
+    database: Arc<db::Database>,
     // TODO: move into separate struct Game
-    session_queue: Arc<net::SessionQueue>,
+    squeue: Arc<net::SessionQueue>,
     sessions: HashMap<u32, net::Session>,
 }
 
 impl Server {
-    pub fn new(addr: &str) -> Server {
-        let session_queue = Arc::new(net::SessionQueue::new(4));
+    pub fn new(config: Config) -> Server {
+        let queue = Arc::new(net::SessionQueue::new(4));
 
         Server {
-            acceptor: Arc::new(net::Acceptor::new(addr, session_queue.clone())),
-            session_queue,
+            acceptor: Arc::new(net::Acceptor::new(
+                config.server.address.clone(),
+                queue.clone(),
+            )),
+            database: Arc::new(db::Database::new(config.database, 4)),
+            squeue: queue,
             sessions: HashMap::new(),
         }
     }
 
     pub fn start(&mut self) -> Result<()> {
         log::info!(target: "Server", "Starting...");
+
         let acceptor = self.acceptor.clone();
-        net::spawn_network(async move {
-            if let Err(e) = acceptor.start().await {
-                panic!(e);
-            }
-        })?;
+        let db = self.database.clone();
+        let runtime = tokio::runtime::Runtime::new()?;
+        thread::spawn(move || {
+            runtime.block_on(async move {
+                // TODO: remove .compat() after sqlx tokio updates to 1.0
+                unrecoverable!(db.start().compat().await);
+                unrecoverable!(acceptor.start().await);
+            });
+        });
         log::info!(target: "Server", "Startup successful");
 
         let mut then = Instant::now();
         loop {
             if util::Control::should_stop() {
-                break;
+                return Ok(());
             }
 
             let now = Instant::now();
@@ -46,14 +62,12 @@ impl Server {
                 self.tick();
             }
         }
-
-        Ok(())
     }
 
     fn tick(&mut self) {
         // info!(target: "Server", "Tick");
         // handle new sessions
-        while let Some(event) = self.session_queue.try_pop() {
+        while let Some(event) = self.squeue.try_pop() {
             use net::ClientEvent;
             match event {
                 ClientEvent::Connected(session) => {

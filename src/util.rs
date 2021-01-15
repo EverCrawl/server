@@ -19,14 +19,17 @@ impl Control {
         Ok(())
     }
 
+    #[inline]
     pub fn should_stop() -> bool {
         CONTROL.load(Ordering::SeqCst)
     }
 
+    #[inline]
     pub fn should_stop_async() -> ShouldStop {
         ShouldStop
     }
 
+    #[inline]
     pub fn stop() {
         CONTROL.store(true, Ordering::SeqCst);
     }
@@ -42,4 +45,15 @@ impl Future for ShouldStop {
             Poll::Pending
         }
     }
+}
+
+/// Wraps an expression with a `Result` type and panics in the `Err` case.
+#[macro_export]
+macro_rules! unrecoverable {
+    ($it:expr) => {
+        match $it {
+            Err(err) => panic!(err),
+            Ok(value) => value,
+        }
+    };
 }
