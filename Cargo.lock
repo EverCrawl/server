@@ -884,6 +884,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "packet-rs"
+version = "0.1.0"
+source = "git+https://github.com/EverCrawl/packet-rs#8807c082699d404611c6d6b36cf6fc546adc668a"
+dependencies = [
+ "byteorder",
+ "thiserror",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1281,6 +1290,7 @@ dependencies = [
  "deadqueue",
  "futures-util",
  "log",
+ "packet-rs",
  "pretty_env_logger",
  "serde",
  "sqlx",

@@ -12,13 +12,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tungstenite as ws;
 
-pub type SessionQueue = deadqueue::limited::Queue<ClientEvent>;
+pub type SessionQueue = deadqueue::limited::Queue<SessionEvent>;
 pub type Message = String;
 pub type MessageQueue = deadqueue::limited::Queue<Message>;
 
 // TODO: anytime the client does anything unexpected, immediately disconnect them
+// TODO: figure out how to prevent clients from spamming
 
-pub enum ClientEvent {
+pub enum SessionEvent {
     Connected(Session),
     Disconnected(u32),
 }
@@ -173,6 +174,7 @@ async fn wait_for_credentials(ws: &mut WebSocketStream<TcpStream>) -> Result<Cre
                 // If so, it gets validated by querying the DB
                 Ok(InvalidCredentials::from(msg.into_text()?).validate().await?)
             } else {
+                let _ = ws.send("Failed to authenticate".into()).await;
                 Err(anyhow::anyhow!("Failed to authenticate"))
             }
         }
@@ -210,7 +212,7 @@ impl Socket {
         let mqueue = Arc::new(MessageQueue::new(4));
 
         squeue
-            .push(ClientEvent::Connected(Session::new(
+            .push(SessionEvent::Connected(Session::new(
                 self.id,
                 self.credentials.clone(),
                 mqueue.clone(),
@@ -220,7 +222,6 @@ impl Socket {
         loop {
             tokio::select! {
                 _ = Control::should_stop_async() => {
-                    // Don't need to notify server about disconnection, process shutdown is our garbage collector.
                     break;
                 }
                 Some(msg) = stream.next() => {
@@ -229,7 +230,7 @@ impl Socket {
                     if msg.is_text() {
                         mqueue.push(msg.into_text().unwrap()).await;
                     } else if msg.is_close() {
-                        squeue.push(ClientEvent::Disconnected(self.id)).await;
+                        squeue.push(SessionEvent::Disconnected(self.id)).await;
                     }
                 },
                 msg = mqueue.pop() => {

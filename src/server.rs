@@ -66,28 +66,29 @@ impl Server {
 
     fn tick(&mut self) {
         // info!(target: "Server", "Tick");
-        // handle new sessions
+        // handle session events
         while let Some(event) = self.squeue.try_pop() {
-            use net::ClientEvent;
+            use net::SessionEvent;
             match event {
-                ClientEvent::Connected(session) => {
+                SessionEvent::Connected(session) => {
                     log::info!(target: "Server", "Server got client {}", session.id());
                     self.sessions.insert(session.id(), session)
                 }
-                ClientEvent::Disconnected(id) => {
+                SessionEvent::Disconnected(id) => {
                     log::info!(target: "Server", "Server lost client {}", id);
                     self.sessions.remove(&id)
                 }
             };
         }
 
+        // echo all messages back
         for (_, session) in self.sessions.iter_mut() {
             while let Some(msg) = session.recv() {
-                // echo all messages back
                 session.send(msg);
             }
         }
 
+        // send "Tick" to sessions
         for (_, session) in self.sessions.iter() {
             session.send("Tick".into());
         }

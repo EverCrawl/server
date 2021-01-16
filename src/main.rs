@@ -7,6 +7,7 @@ mod net;
 mod server;
 #[macro_use]
 mod util;
+mod schemas;
 
 use anyhow::Result;
 
