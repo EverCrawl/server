@@ -7,6 +7,7 @@ mod net;
 mod server;
 #[macro_use]
 mod util;
+#[rustfmt::skip]
 mod schemas;
 
 use anyhow::Result;
