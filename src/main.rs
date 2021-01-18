@@ -1,4 +1,4 @@
-// To allow for impls with `fn (self: Arc<Self>) { ... }`
+// impls with `fn (self: Arc<Self>) { ... }`
 #![feature(arbitrary_self_types)]
 
 mod config;

@@ -15,13 +15,13 @@ pub struct Server {
     acceptor: Arc<net::Acceptor>,
     database: Arc<db::Database>,
     // TODO: move into separate struct Game
-    squeue: Arc<net::SessionQueue>,
+    squeue: Arc<net::session::Queue>,
     sessions: HashMap<u32, net::Session>,
 }
 
 impl Server {
     pub fn new(config: Config) -> Server {
-        let queue = Arc::new(net::SessionQueue::new(4));
+        let queue = Arc::new(net::session::Queue::new(4));
 
         Server {
             acceptor: Arc::new(net::Acceptor::new(
@@ -68,13 +68,13 @@ impl Server {
         // info!(target: "Server", "Tick");
         // handle session events
         while let Some(event) = self.squeue.try_pop() {
-            use net::SessionEvent;
+            use net::session::Event;
             match event {
-                SessionEvent::Connected(session) => {
+                Event::Connected(session) => {
                     log::info!(target: "Server", "Server got client {}", session.id());
                     self.sessions.insert(session.id(), session)
                 }
-                SessionEvent::Disconnected(id) => {
+                Event::Disconnected(id) => {
                     log::info!(target: "Server", "Server lost client {}", id);
                     self.sessions.remove(&id)
                 }
@@ -84,13 +84,13 @@ impl Server {
         // echo all messages back
         for (_, session) in self.sessions.iter_mut() {
             while let Some(msg) = session.recv() {
-                session.send(msg);
+                session.send(net::Message::build(msg.id(), msg.payload()));
             }
         }
 
         // send "Tick" to sessions
-        for (_, session) in self.sessions.iter() {
+        /* for (_, session) in self.sessions.iter() {
             session.send("Tick".into());
-        }
+        } */
     }
 }
