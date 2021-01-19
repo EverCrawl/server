@@ -53,10 +53,6 @@ impl Database {
             .await?;
         log::info!(target: "Database", "Connected");
 
-        log::info!(target: "Database", "Running migrations");
-        sqlx::migrate!().run(&pool).compat().await?;
-        log::info!(target: "Database", "Migrations complete");
-
         tokio::spawn(async move {
             loop {
                 tokio::select! {
