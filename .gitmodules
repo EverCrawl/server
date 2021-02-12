@@ -1,3 +1,6 @@
 [submodule "schemas"]
 	path = schemas
 	url = https://github.com/EverCrawl/schemas.git
+[submodule "assets"]
+	path = assets
+	url = https://github.com/EverCrawl/assets.git

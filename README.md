@@ -1,3 +1,5 @@
+# Moved to [EverCrawl/game](https://github.com/EverCrawl/game)
+
 EverCrawl server
 
 The game design document is accessible [here](./design.md). The server-specific architecture document is accessible [here](./architecture.md).
